@@ -3,6 +3,7 @@ import uuid
 from enum import Enum
 import csv
 import codecs
+from hashlib import md5
 
 from django.db import models
 from django.core.validators import RegexValidator
@@ -13,6 +14,7 @@ from django.db.models.signals import post_save
 from django.core.cache.utils import make_template_fragment_key
 from django.core.cache import cache
 from django.dispatch import receiver
+from django.utils import timezone
 
 
 districts = (
@@ -99,6 +101,16 @@ person_status = (
     ('closed', 'Closed')
 )
 
+contribution_types = (
+    ('fod', 'Food'),
+    ('med', 'Medicines'),
+    ('shl', 'Shelter'),
+    ('clt', 'Clothing'),
+    ('sny', 'Sanitary materials'),
+    ('oth', 'Others')
+)
+
+
 class LSGTypes(Enum):
     CORPORATION = 0
     MUNICIPALITY = 1
@@ -112,17 +124,16 @@ class Request(models.Model):
         verbose_name='District - ജില്ല'
     )
     location = models.CharField(max_length=500,verbose_name='Location - സ്ഥലം')
-    requestee = models.CharField(max_length=100,verbose_name='Requestee - അപേക്ഷകന്‍റെ പേര്')
+    requestee = models.CharField(max_length=100,verbose_name='Requestee - അപേക്ഷകന്റെ പേര്')
 
     phone_number_regex = RegexValidator(regex='^((\+91|91|0)[\- ]{0,1})?[456789]\d{9}$', message='Please Enter 10/11 digit mobile number or landline as 0<std code><phone number>', code='invalid_mobile')
-    requestee_phone = models.CharField(max_length=14,verbose_name='Requestee Phone - അപേക്ഷകന്‍റെ ഫോണ്‍ നമ്പര്‍', validators=[phone_number_regex])
+    requestee_phone = models.CharField(max_length=14,verbose_name='Requestee Phone - അപേക്ഷകന്റെ ഫോണ്‍ നമ്പര്‍', validators=[phone_number_regex])
 
     latlng = models.CharField(max_length=100, verbose_name='GPS Coordinates - GPS നിർദ്ദേശാങ്കങ്ങൾ ', blank=True)
     latlng_accuracy = models.CharField(max_length=100, verbose_name='GPS Accuracy - GPS കൃത്യത ', blank=True)
     #  If it is enabled no need to consider lat and lng
     is_request_for_others = models.BooleanField(
-        verbose_name='Requesting for others - മറ്റൊരാൾക്ക് വേണ്ടി അപേക്ഷിക്കുന്നു  ', default=False,
-        help_text="If it is enabled, no need to consider lat and lng")
+        verbose_name='Requesting for others - മറ്റൊരാൾക്ക് വേണ്ടി അപേക്ഷിക്കുന്നു ', default=False)
 
     needwater = models.BooleanField(verbose_name='Water - വെള്ളം')
     needfood = models.BooleanField(verbose_name='Food - ഭക്ഷണം')
@@ -132,10 +143,10 @@ class Request(models.Model):
     needkit_util = models.BooleanField(verbose_name='Kitchen utensil - അടുക്കള സാമഗ്രികള്‍')
     needrescue = models.BooleanField(verbose_name='Need rescue - രക്ഷാപ്രവർത്തനം ആവശ്യമുണ്ട്')
 
-    detailwater = models.CharField(max_length=250, verbose_name='Details for required water - ആവശ്യമായ വെള്ളത്തിന്‍റെ വിവരങ്ങള്‍', blank=True)
-    detailfood = models.CharField(max_length=250, verbose_name='Details for required food - ആവശ്യമായ ഭക്ഷണത്തിന്‍റെ വിവരങ്ങള്‍', blank=True)
-    detailcloth = models.CharField(max_length=250, verbose_name='Details for required clothing - ആവശ്യമായ വസ്ത്രത്തിന്‍റെ വിവരങ്ങള്‍', blank=True)
-    detailmed = models.CharField(max_length=250, verbose_name='Details for required medicine - ആവശ്യമായ മരുന്നിന്‍റെ  വിവരങ്ങള്‍', blank=True)
+    detailwater = models.CharField(max_length=250, verbose_name='Details for required water - ആവശ്യമായ വെള്ളത്തിന്റെ വിവരങ്ങള്‍', blank=True)
+    detailfood = models.CharField(max_length=250, verbose_name='Details for required food - ആവശ്യമായ ഭക്ഷണത്തിന്റെ വിവരങ്ങള്‍', blank=True)
+    detailcloth = models.CharField(max_length=250, verbose_name='Details for required clothing - ആവശ്യമായ വസ്ത്രത്തിന്റെ വിവരങ്ങള്‍', blank=True)
+    detailmed = models.CharField(max_length=250, verbose_name='Details for required medicine - ആവശ്യമായ മരുന്നിന്റെ  വിവരങ്ങള്‍', blank=True)
     detailtoilet = models.CharField(max_length=250, verbose_name='Details for required toiletries - ആവശ്യമായ  ശുചീകരണ സാമഗ്രികള്‍', blank=True)
     detailkit_util = models.CharField(max_length=250, verbose_name='Details for required kitchen utensil - ആവശ്യമായ അടുക്കള സാമഗ്രികള്‍', blank=True)
     detailrescue = models.CharField(max_length=250, verbose_name='Details for rescue action - രക്ഷാപ്രവർത്തനം വിവരങ്ങള്', blank=True)
@@ -163,6 +174,8 @@ class Request(models.Model):
             out += "\nToilet Requirements :\n {}".format(self.detailtoilet)
         if(self.needkit_util):
             out += "\nKit Requirements :\n {}".format(self.detailkit_util)
+        if(self.needrescue):
+            out += "\nRescue Action :\n {}".format(self.detailrescue)
         if(len(self.needothers.strip()) != 0):
             out += "\nOther Needs :\n {}".format(self.needothers)
         return out
@@ -172,13 +185,23 @@ class Request(models.Model):
         verbose_name_plural = 'Rescue:Requests'
 
     def __str__(self):
-        return self.get_district_display() + ' ' + self.location
+        return '#' + str(self.id) + ' ' + self.get_district_display() + ' ' + self.location
+
+    def is_old(self):
+        return self.dateadded < (timezone.now() - timezone.timedelta(days=2))
+
+
+class VolunteerGroup(models.Model):
+    group_name = models.CharField(max_length = 200)
+
+    def __str__(self):
+        return "Group Name " + str(self.group_name) + " || Volunteer Count " + str(Volunteer.objects.all().filter(groups__in=[self]).count())
 
 
 class Volunteer(models.Model):
     district = models.CharField(
-        max_length = 15,
-        choices = districts,
+        max_length=15,
+        choices=districts,
         verbose_name="District - ജില്ല"
     )
     name = models.CharField(max_length=100, verbose_name="Name - പേര്")
@@ -197,6 +220,7 @@ class Volunteer(models.Model):
     joined = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
     has_consented = models.BooleanField(default=False, verbose_name="Available")
+    groups = models.ManyToManyField(VolunteerGroup)
 
     class Meta:
         verbose_name = 'Volunteer: Individual'
@@ -225,6 +249,7 @@ class NGO(models.Model):
         max_length=500,
         verbose_name="Preferred Location to Volunteer"
     )
+    website_url = models.CharField(max_length=300,verbose_name="Enter your website link",default='')
     is_spoc = models.BooleanField(default=False, verbose_name="Is point of contact")
     joined = models.DateTimeField(auto_now_add=True)
 
@@ -248,11 +273,16 @@ class Contributor(models.Model):
     phone = models.CharField(max_length=14, verbose_name="Phone - ഫോണ്‍ നമ്പര്‍", validators=[phone_number_regex])
 
     address = models.TextField(verbose_name="Address - വിലാസം")
-    commodities = models.TextField(verbose_name="What you can contribute. ( സംഭാവന ചെയ്യാന്‍ ഉദ്ദേശിക്കുന്ന സാധനങ്ങള്‍ ) -- Eg: Shirts, torches etc ")
+    contrib_details = models.TextField(verbose_name="Details of contribution Eg: 10 shirts", default='')
     status = models.CharField(
         max_length = 10,
         choices = contrib_status_types,
         default = 'new'
+    )
+    contribution_type = models.CharField(
+    max_length=3,
+    choices=contribution_types,
+    default='oth'
     )
 
     class Meta:
@@ -288,10 +318,12 @@ class DistrictNeed(models.Model):
     )
     needs = models.TextField(verbose_name="Items required")
     cnandpts = models.TextField(verbose_name="Contacts and collection points") #contacts and collection points
+    inventory = models.TextField()
+    date_modified = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'District: Need'
-        verbose_name_plural = 'District: Needs'
+        verbose_name = 'District: Need and Collection center'
+        verbose_name_plural = 'District: Needs and Collection centers'
 
     def __str__(self):
         return self.get_district_display()
@@ -309,6 +341,9 @@ class DistrictCollection(models.Model):
     class Meta:
         verbose_name = 'District: Collection'
         verbose_name_plural = 'District: Collections'
+
+    def __str__(self):
+        return self.get_district_display()
 
 
 class RescueCamp(models.Model):
@@ -382,11 +417,6 @@ def expire_people_filter_form(sender, **kwargs):
 
 
 class PrivateRescueCamp(models.Model):
-    lsg_types = [
-        (LSGTypes.CORPORATION.value, 'Corporation'),
-        (LSGTypes.MUNICIPALITY.value, 'Municipality'),
-        (LSGTypes.GRAMA_PANCHAYATH.value, 'Grama Panchayath')
-    ]
 
     name = models.CharField(max_length=50,verbose_name="Camp Name - ക്യാമ്പിന്റെ പേര്")
     location = models.TextField(verbose_name="Address - അഡ്രസ്",blank=True,null=True)
@@ -394,15 +424,8 @@ class PrivateRescueCamp(models.Model):
         max_length=15,
         choices=districts
     )
-    lsg_type = models.SmallIntegerField(
-        choices=lsg_types,
-        verbose_name='LSG Type - തദ്ദേശ സ്വയംഭരണ സ്ഥാപനം',
-        null=True, blank=True
-    )
     lsg_name = models.CharField(max_length=150, null=True, blank=True, verbose_name="LSG Name - സ്വയംഭരണ സ്ഥാപനത്തിന്റെ പേര്")
     ward_name = models.CharField(max_length=150, null=True, blank=True, verbose_name="Ward - വാർഡ്")
-    is_inside_kerala = models.BooleanField(verbose_name="Center inside kerala? - കേന്ദ്രം കേരളത്തിലാണോ")
-    city = models.CharField(max_length=150, verbose_name="City - നഗരം")
     contacts = models.TextField(verbose_name="Phone Numbers - ഫോൺ നമ്പറുകൾ",blank=True,null=True)
     facilities_available = models.TextField(
         blank=True,
@@ -439,8 +462,8 @@ class PrivateRescueCamp(models.Model):
 
 
 class Person(models.Model):
-    name = models.CharField(max_length=30,blank=False,null=False,verbose_name="Name - പേര്")
-    phone = models.CharField(max_length=11,null=True,blank=True,verbose_name='Mobile - മൊബൈൽ')
+    name = models.CharField(max_length=51,blank=False,null=False,verbose_name="Name - പേര്")
+    phone = models.CharField(max_length=14,null=True,blank=True,verbose_name='Mobile - മൊബൈൽ')
     age = models.IntegerField(null=True,blank=True,verbose_name="Age - പ്രായം")
     gender = models.IntegerField(
         choices = gender,
@@ -470,6 +493,7 @@ class Person(models.Model):
     )
 
     unique_identifier = models.CharField(max_length=32, default='', blank=True)
+    is_dup = models.BooleanField(default=False)
 
     @property
     def sex(self):
@@ -501,9 +525,25 @@ class Person(models.Model):
     class Meta:
         verbose_name = 'Relief: Inmate'
         verbose_name_plural = "Relief: Inmates"
+        indexes = [
+            models.Index(fields=['name', '-added_at',]),
+        ]
 
     def __str__(self):
         return self.name
+
+    def save(self, *args, **kwargs):
+        identifier_str = (str(self.camped_at.id) +
+            str(self.name) +
+            str(self.address) +
+            str(self.phone) +
+            str(self.age) +
+            str(self.gender) +
+            str(self.notes)).encode('utf-8')
+        self.unique_identifier =  md5(identifier_str).hexdigest()
+        if(Person.objects.filter(unique_identifier = self.unique_identifier).count() == 0 ):
+            super(Person, self).save(*args, **kwargs)
+
 
 
 def upload_to(instance, filename):
@@ -521,6 +561,7 @@ class Announcements(models.Model):
         default='L')
 
     description = models.TextField(blank=True)
+    hashtags = models.TextField(blank=True,default="",help_text="Add hashtags as comma separated values.")
     image = models.ImageField(blank=True, upload_to=upload_to)
     upload = models.FileField(blank=True, upload_to=upload_to)
     is_pinned = models.BooleanField(default=False)
@@ -545,8 +586,8 @@ class DataCollection(models.Model):
     tag = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
-        verbose_name = 'Data: Collection'
-        verbose_name_plural = 'Data: Collections'
+        verbose_name = 'Data Uploads'
+        verbose_name_plural = 'Data Uploads'
 
     def __str__(self):
         return self.document_name
@@ -604,6 +645,10 @@ class CollectionCenter(models.Model):
     is_inside_kerala = models.BooleanField(default=True, verbose_name="Center inside kerala? - കേന്ദ്രം കേരളത്തിലാണോ")
     city = models.CharField(null=True, blank=True, max_length=150, verbose_name="City - നഗരം")
     added_at = models.DateTimeField(auto_now_add=True)
+    map_link = models.TextField( verbose_name='Map(Cordinate links) link',blank=True,null=True,help_text="Copy and paste the full Google Maps link")
+
+    class Meta:
+        verbose_name = 'Private collection centers'
 
     def __str__(self):
         return self.name
@@ -644,3 +689,72 @@ class CsvBulkUpload(models.Model):
 
     def __str__(self):
         return self.name
+
+class Hospital(models.Model):
+    district = models.CharField(
+        max_length = 15,
+        choices = districts,
+        verbose_name="District - ജില്ല",
+        null=True,
+        blank=True
+    )
+    name = models.CharField(max_length=200)
+    officer = models.CharField(max_length=100)
+    designation = models.CharField(max_length=250, verbose_name="Officer name")
+    phone_number_regex = RegexValidator(regex='^((\+91|91|0)[\- ]{0,1})?[456789]\d{9}$',
+                                        message='Please Enter 10/11 digit mobile number or landline as 0<std code><phone number>',
+                                        code='invalid_mobile')
+    landline = models.CharField(max_length=14, validators=[phone_number_regex])
+    mobile = models.CharField(max_length=14, validators=[phone_number_regex])
+    email = models.EmailField()
+
+    def __str__(self):
+        return self.name + ' - ' + self.designation      
+
+
+class SmsJob(models.Model):
+    """
+    Sends sms to volunteers for now. In the future I plan to implement something that can send sms to other models,
+    like NGOs and Contributors
+    """
+    SMS_CHOICES = (
+        ('consent', 'Consent'),
+        ('info', 'Information'),
+        ('survey',"Survey")
+    )
+    AREA_CHOICES = (
+        ('dcr', 'Doctor'),
+        ('hsv', 'Health Services'),
+        ('elw', 'Electrical Works'),
+        ('mew', 'Mechanical Work'),
+        ('cvw', 'Civil Work'),
+        ('plw', 'Plumbing work'),
+        ('vls', 'Vehicle Support'),
+        ('ckg', 'Cooking'),
+        ('rlo', 'Relief operation'),
+        ('cln', 'Cleaning'),
+        ('bot', 'Boat Service'),
+        ('rck', 'Rock Climbing'),
+        ('oth', 'Other')
+    )
+    district = models.CharField(choices=districts, max_length=3 , blank=True,null=True)
+    sms_type = models.CharField(choices=SMS_CHOICES, max_length=10)
+    area = models.CharField(choices=AREA_CHOICES, max_length=3, blank=True ,null=True)
+    group = models.ForeignKey(VolunteerGroup , models.CASCADE , null=True , blank=True)
+    message = models.CharField(max_length=160, null=True, blank=True, help_text='This will only be used for \
+    informational messages. For consent messages, a preconfigured message is used')
+    failure = models.CharField(max_length=100, null=True, blank=True)
+    has_completed = models.BooleanField(default=False)
+    
+    def __str__(self):
+        mess = ""  
+        if self.sms_type == "info":
+            mess = "Message {} sent to ".format(self.message)
+        else:
+            mess = "Consent Message sent to "
+        if(self.district != None and self.area != None):
+            return mess + self.get_district_display() + '-' + self.get_area_display() 
+        else:
+            return mess + "Sent to Group :" + str(self.group)
+
+
